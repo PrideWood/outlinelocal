@@ -61,6 +61,31 @@ npm install
 npm run dev
 ```
 
+## Deploy to GitHub Pages
+
+This app is a static Vite frontend and does not require a backend, upload service, auth service, or runtime server.
+The GitHub Actions workflow in `.github/workflows/pages.yml` builds `dist/` with `npm run build` and deploys it from the `main` branch using GitHub's standard Pages artifact flow.
+
+Repository setup:
+
+1. Push this repository to GitHub.
+2. In GitHub, open Settings -> Pages.
+3. Set Source to "GitHub Actions".
+4. Push to `main` or run the "Deploy to GitHub Pages" workflow manually.
+
+The Vite `base` is configured as `./` so built assets work from either a repository subpath such as `https://USER.github.io/REPO/` or a future custom-domain root.
+
+### Future custom domain
+
+The intended custom domain is `ol.dacnote.com`. A `CNAME` file is intentionally not committed yet because enabling it before DNS and GitHub Pages domain settings are ready can make the published site resolve incorrectly.
+
+When binding the domain later:
+
+1. Add the custom domain `ol.dacnote.com` in GitHub Pages settings.
+2. Configure DNS for `ol.dacnote.com` as a CNAME pointing to the GitHub Pages hostname.
+3. Add `public/CNAME` containing exactly `ol.dacnote.com`.
+4. Commit and push the `CNAME` file so the Pages deployment preserves the custom domain.
+
 ## Current mock / placeholder boundaries
 
 - The app still starts with sample outline data before a PDF is opened.
