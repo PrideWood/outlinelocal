@@ -12,6 +12,7 @@ import {
   indentSelectedOutlineLines,
   outdentSelectedOutlineLines,
   replaceAllInText,
+  removeEmptyOutlineLines,
   splitTrailingPageNumbers,
 } from "../features/outline-text/outlineTextCommands";
 
@@ -119,6 +120,16 @@ export const App = () => {
               return;
             }
             document.setSelectedNodeIds(allBookmarkIds);
+          }}
+          onRemoveEmptyLines={() => {
+            const result = removeEmptyOutlineLines(document.sourceText);
+            applyTextEdit(result.value);
+            document.setStatusMessage(
+              result.removedCount === 0
+                ? "No empty lines were found."
+                : `Removed ${result.removedCount} empty line${result.removedCount === 1 ? "" : "s"}.`,
+              result.removedCount === 0 ? "warning" : "info",
+            );
           }}
           onSplitPageTitle={() => {
             const result = splitTrailingPageNumbers(document.sourceText);

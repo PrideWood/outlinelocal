@@ -4,6 +4,7 @@ import {
   ListIndentDecrease,
   ListIndentIncrease,
   ListOrdered,
+  ListX,
   Replace,
   ReplaceAll,
   SeparatorVertical,
@@ -29,6 +30,7 @@ type EditingToolsBarProps = {
   onReplace: () => void;
   onReplaceAll: () => void;
   onSelectAll: () => void;
+  onRemoveEmptyLines: () => void;
   onSplitPageTitle: () => void;
   onAutoHierarchy: () => void;
   onApplyPageOffset: () => void;
@@ -48,6 +50,7 @@ export const EditingToolsBar = ({
   onReplace,
   onReplaceAll,
   onSelectAll,
+  onRemoveEmptyLines,
   onSplitPageTitle,
   onAutoHierarchy,
   onApplyPageOffset,
@@ -105,6 +108,17 @@ export const EditingToolsBar = ({
       >
         <SquareDashedText {...iconProps} />
       </button>
+      {editorMode === "text" ? (
+        <button
+          className="icon-button"
+          type="button"
+          title="Remove empty lines"
+          aria-label="Remove empty lines"
+          onClick={onRemoveEmptyLines}
+        >
+          <ListX {...iconProps} />
+        </button>
+      ) : null}
     </div>
 
     <div className="editing-tools-bar__group">

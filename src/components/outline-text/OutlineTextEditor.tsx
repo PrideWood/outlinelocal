@@ -79,7 +79,7 @@ export const OutlineTextEditor = ({
   };
 
   return (
-    <section className="editor-surface">
+    <section className="editor-surface editor-surface--text">
       <div className="editor-surface__header">
         <h2>Text View</h2>
         <span>Tab indents selected line(s), Shift+Tab outdents.</span>

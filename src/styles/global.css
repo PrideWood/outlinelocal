@@ -234,6 +234,10 @@ button:disabled {
   background: var(--panel);
 }
 
+.editor-surface--text {
+  min-height: 0;
+}
+
 .editor-surface__header {
   display: flex;
   justify-content: space-between;
@@ -376,9 +380,8 @@ button:disabled {
 }
 
 .source-editor {
-  flex: 1;
   width: 100%;
-  min-height: 0;
+  min-height: min(58vh, 620px);
   padding: 14px;
   resize: none;
   border: 0;
@@ -392,7 +395,7 @@ button:disabled {
 .source-footer {
   display: grid;
   grid-template-columns: minmax(240px, 320px) 1fr;
-  min-height: 150px;
+  align-items: start;
 }
 
 .source-footer__summary,
@@ -409,7 +412,6 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  overflow: auto;
 }
 
 .source-errors__empty {

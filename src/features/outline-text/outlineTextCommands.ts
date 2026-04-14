@@ -15,6 +15,11 @@ export type SplitPageTitleResult = {
   transformedCount: number;
 };
 
+export type RemoveEmptyLinesResult = {
+  value: string;
+  removedCount: number;
+};
+
 const getSelectedLineRange = (
   value: string,
   selectionStart: number,
@@ -171,6 +176,23 @@ export const splitTrailingPageNumbers = (value: string): SplitPageTitleResult =>
 
 export const splitPageTitleLines = (value: string): string =>
   splitTrailingPageNumbers(value).value;
+
+export const removeEmptyOutlineLines = (value: string): RemoveEmptyLinesResult => {
+  let removedCount = 0;
+  const lines = value.split("\n");
+  const nextLines = lines.filter((line) => {
+    const shouldKeep = line.trim().length > 0;
+    if (!shouldKeep) {
+      removedCount += 1;
+    }
+    return shouldKeep;
+  });
+
+  return {
+    value: nextLines.join("\n"),
+    removedCount,
+  };
+};
 
 export const replaceAllInText = (
   value: string,
