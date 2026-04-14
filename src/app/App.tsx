@@ -98,8 +98,12 @@ export const App = () => {
           currentFileName={document.currentFileName}
           editorMode={document.editorMode}
           isExporting={document.isExporting}
+          canUndo={document.canUndo}
+          canRedo={document.canRedo}
           onOpenPdf={document.openPdfFile}
           onExportPdf={document.exportPdf}
+          onUndo={document.undo}
+          onRedo={document.redo}
           onSwitchMode={document.setEditorMode}
         />
 

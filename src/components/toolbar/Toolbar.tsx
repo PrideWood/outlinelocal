@@ -21,8 +21,12 @@ type ToolbarProps = {
   currentFileName: string | null;
   editorMode: EditorMode;
   isExporting: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
   onOpenPdf: (file: File | null) => void;
   onExportPdf: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
   onSwitchMode: (mode: EditorMode) => void;
 };
 
@@ -30,8 +34,12 @@ export const Toolbar = ({
   currentFileName,
   editorMode,
   isExporting,
+  canUndo,
+  canRedo,
   onOpenPdf,
   onExportPdf,
+  onUndo,
+  onRedo,
   onSwitchMode,
 }: ToolbarProps) => {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
@@ -69,10 +77,24 @@ export const Toolbar = ({
           >
             <BadgeQuestionMark {...iconProps} />
           </button>
-          <button className="icon-button" type="button" disabled title="Undo" aria-label="Undo">
+          <button
+            className="icon-button"
+            type="button"
+            disabled={!canUndo}
+            title="Undo"
+            aria-label="Undo"
+            onClick={onUndo}
+          >
             <Undo2 {...iconProps} />
           </button>
-          <button className="icon-button" type="button" disabled title="Redo" aria-label="Redo">
+          <button
+            className="icon-button"
+            type="button"
+            disabled={!canRedo}
+            title="Redo"
+            aria-label="Redo"
+            onClick={onRedo}
+          >
             <Redo2 {...iconProps} />
           </button>
           <span className="toolbar__meta">{currentFileName ?? "No PDF selected"}</span>

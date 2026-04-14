@@ -29,6 +29,18 @@ export type OutlineStatus = {
   tone: StatusTone;
 };
 
+type DocumentSnapshot = {
+  bookmarks: BookmarkNode[];
+  sourceText: string;
+  parseRows: ParsedOutlineRow[];
+  selectedNodeIds: string[];
+};
+
+type DocumentHistory = {
+  past: DocumentSnapshot[];
+  future: DocumentSnapshot[];
+};
+
 const createBookmarkIdFactory = () => {
   let counter = 1000;
   return () => `bookmark-${counter += 1}`;
@@ -49,6 +61,7 @@ export const useOutlineDocument = () => {
   const [editorMode, setEditorMode] = useState<EditorMode>("text");
   const [sourceText, setSourceText] = useState<string>(serializeOutlineTree(mockBookmarks));
   const [parseRows, setParseRows] = useState<ParsedOutlineRow[]>([]);
+  const [history, setHistory] = useState<DocumentHistory>({ past: [], future: [] });
   const [currentFileName, setCurrentFileName] = useState<string | null>(null);
   const [currentPdfFile, setCurrentPdfFile] = useState<File | null>(null);
   const [outlineLoadState, setOutlineLoadState] = useState<OutlineLoadState>("mock");
@@ -66,12 +79,46 @@ export const useOutlineDocument = () => {
     [bookmarks, selectedNodeId],
   );
 
+  const getSnapshot = (): DocumentSnapshot => ({
+    bookmarks,
+    sourceText,
+    parseRows,
+    selectedNodeIds,
+  });
+
+  const applySnapshot = (snapshot: DocumentSnapshot) => {
+    setBookmarks(snapshot.bookmarks);
+    setSourceText(snapshot.sourceText);
+    setParseRows(snapshot.parseRows);
+    setSelectedNodeIds(snapshot.selectedNodeIds);
+  };
+
+  const recordHistory = () => {
+    const snapshot = getSnapshot();
+    setHistory((current) => ({
+      past: [...current.past, snapshot],
+      future: [],
+    }));
+  };
+
+  const clearHistory = () => {
+    setHistory({ past: [], future: [] });
+  };
+
   const getActiveNodeIds = (): string[] => {
     const selectedNodeIdSet = new Set(selectedNodeIds);
     return flattenBookmarkIds(bookmarks).filter((nodeId) => selectedNodeIdSet.has(nodeId));
   };
 
-  const syncTree = (nextBookmarks: BookmarkNode[], nextSelectedNodeId?: string | null) => {
+  const syncTree = (
+    nextBookmarks: BookmarkNode[],
+    nextSelectedNodeId?: string | null,
+    options: { recordHistory?: boolean } = {},
+  ) => {
+    if (options.recordHistory !== false) {
+      recordHistory();
+    }
+
     setBookmarks(nextBookmarks);
     setSourceText(serializeOutlineTree(nextBookmarks));
     setParseRows([]);
@@ -85,7 +132,15 @@ export const useOutlineDocument = () => {
     setSelectedNodeIds(stillSelectedIds.length > 0 ? stillSelectedIds : fallbackNodeId ? [fallbackNodeId] : []);
   };
 
-  const applySourceText = (nextText: string) => {
+  const applySourceText = (nextText: string, options: { recordHistory?: boolean } = {}) => {
+    if (nextText === sourceText) {
+      return;
+    }
+
+    if (options.recordHistory !== false) {
+      recordHistory();
+    }
+
     setSourceText(nextText);
     const result = parseOutlineText(nextText, bookmarks, createId);
     setParseRows(result.rows);
@@ -123,6 +178,8 @@ export const useOutlineDocument = () => {
     outlineLoadState,
     isExporting,
     status,
+    canUndo: history.past.length > 0,
+    canRedo: history.future.length > 0,
     setStatusMessage(message: string, tone: StatusTone = "info") {
       setStatus({ message, tone });
     },
@@ -155,7 +212,8 @@ export const useOutlineDocument = () => {
         setEditorMode("text");
 
         if (extractedBookmarks.length === 0) {
-          syncTree([], null);
+          syncTree([], null, { recordHistory: false });
+          clearHistory();
           setOutlineLoadState("empty");
           setStatus({
             message: readResult.diagnostics.hasRawOutlinesMarker
@@ -166,7 +224,8 @@ export const useOutlineDocument = () => {
           return;
         }
 
-        syncTree(extractedBookmarks, fallbackSelection(extractedBookmarks));
+        syncTree(extractedBookmarks, fallbackSelection(extractedBookmarks), { recordHistory: false });
+        clearHistory();
         setOutlineLoadState("loaded");
         setStatus({
           message: `Loaded ${countBookmarks(extractedBookmarks)} outline entries from ${file.name}${readResult.diagnostics.usedFallback ? " using the raw /Outlines fallback." : "."}`,
@@ -177,7 +236,8 @@ export const useOutlineDocument = () => {
           return;
         }
 
-        syncTree([], null);
+        syncTree([], null, { recordHistory: false });
+        clearHistory();
         setOutlineLoadState("error");
         setStatus({
           message:
@@ -241,6 +301,40 @@ export const useOutlineDocument = () => {
         setIsExporting(false);
       }
     },
+    undo() {
+      const previous = history.past[history.past.length - 1];
+      if (!previous) {
+        return;
+      }
+
+      const currentSnapshot = getSnapshot();
+      applySnapshot(previous);
+      setHistory({
+        past: history.past.slice(0, -1),
+        future: [currentSnapshot, ...history.future],
+      });
+      setStatus({
+        message: "Undid the previous outline edit.",
+        tone: "info",
+      });
+    },
+    redo() {
+      const next = history.future[0];
+      if (!next) {
+        return;
+      }
+
+      const currentSnapshot = getSnapshot();
+      applySnapshot(next);
+      setHistory({
+        past: [...history.past, currentSnapshot],
+        future: history.future.slice(1),
+      });
+      setStatus({
+        message: "Redid the outline edit.",
+        tone: "info",
+      });
+    },
     exportOutlineText() {
       const blob = new Blob([sourceText], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -271,7 +365,7 @@ export const useOutlineDocument = () => {
       if (!selectedNodeId) {
         return;
       }
-      syncTree(toggleNodeOpen(bookmarks, selectedNodeId));
+      syncTree(toggleNodeOpen(bookmarks, selectedNodeId), undefined, { recordHistory: false });
     },
     addSibling() {
       if (!selectedNodeId) {
@@ -358,7 +452,7 @@ export const useOutlineDocument = () => {
       syncTree(updateNodePage(bookmarks, nodeId, pageNumber - 1));
     },
     toggleNode(nodeId: string) {
-      syncTree(toggleNodeOpen(bookmarks, nodeId));
+      syncTree(toggleNodeOpen(bookmarks, nodeId), undefined, { recordHistory: false });
     },
   };
 };

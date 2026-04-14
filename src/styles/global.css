@@ -373,23 +373,51 @@ button:disabled {
   white-space: nowrap;
 }
 
-.source-editor {
-  border: 1px solid var(--border);
-  background: #fff;
-  color: inherit;
+.source-editor-frame {
+  display: grid;
+  grid-template-columns: 3.2rem 1fr;
+  height: min(58vh, 620px);
+  min-height: 360px;
+  border-bottom: 1px solid var(--border);
+  background: #fcfcfd;
+}
+
+.source-editor-gutter {
+  height: 100%;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: #f0f4f7;
+  color: var(--ink-soft);
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.96rem;
+  line-height: 1.6;
+  user-select: none;
+}
+
+.source-editor-gutter__lines {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-height: 100%;
+  padding: 14px 0.65rem 14px 0.35rem;
+}
+
+.source-editor-gutter__lines span {
+  min-height: 1.6em;
 }
 
 .source-editor {
   width: 100%;
-  min-height: min(58vh, 620px);
+  height: 100%;
+  min-height: 0;
   padding: 14px;
   resize: none;
   border: 0;
-  border-bottom: 1px solid var(--border);
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   font-size: 0.96rem;
   line-height: 1.6;
   background: #fcfcfd;
+  color: inherit;
 }
 
 .source-footer {

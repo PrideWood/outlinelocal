@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   indentSelectedOutlineLines,
   outdentSelectedOutlineLines,
@@ -23,7 +23,12 @@ export const OutlineTextEditor = ({
   onSelectionChange,
 }: OutlineTextEditorProps) => {
   const invalidRows = parseRows.filter((row) => row.error !== null);
+  const lineNumbers = useMemo(
+    () => Array.from({ length: Math.max(1, value.split("\n").length) }, (_, index) => index + 1),
+    [value],
+  );
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const gutterRef = useRef<HTMLDivElement | null>(null);
   const handledSelectAllRequestRef = useRef(0);
   const handledSelectionRequestRef = useRef<number | null>(null);
 
@@ -85,39 +90,55 @@ export const OutlineTextEditor = ({
         <span>Tab indents selected line(s), Shift+Tab outdents.</span>
       </div>
 
-      <textarea
-        ref={textareaRef}
-        className="source-editor"
-        spellCheck={false}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        onSelect={(event) =>
-          onSelectionChange({
-            start: event.currentTarget.selectionStart,
-            end: event.currentTarget.selectionEnd,
-          })
-        }
-        onClick={(event) =>
-          onSelectionChange({
-            start: event.currentTarget.selectionStart,
-            end: event.currentTarget.selectionEnd,
-          })
-        }
-        onKeyUp={(event) =>
-          onSelectionChange({
-            start: event.currentTarget.selectionStart,
-            end: event.currentTarget.selectionEnd,
-          })
-        }
-        onKeyDown={(event) => {
-          if (event.key !== "Tab") {
-            return;
-          }
+      <div className="source-editor-frame">
+        <div ref={gutterRef} className="source-editor-gutter" aria-hidden="true">
+          <div className="source-editor-gutter__lines">
+            {lineNumbers.map((lineNumber) => (
+              <span key={lineNumber}>{lineNumber}</span>
+            ))}
+          </div>
+        </div>
 
-          event.preventDefault();
-          indentSelection(event.shiftKey ? "out" : "in");
-        }}
-      />
+        <textarea
+          ref={textareaRef}
+          className="source-editor"
+          spellCheck={false}
+          wrap="off"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onScroll={(event) => {
+            if (gutterRef.current) {
+              gutterRef.current.scrollTop = event.currentTarget.scrollTop;
+            }
+          }}
+          onSelect={(event) =>
+            onSelectionChange({
+              start: event.currentTarget.selectionStart,
+              end: event.currentTarget.selectionEnd,
+            })
+          }
+          onClick={(event) =>
+            onSelectionChange({
+              start: event.currentTarget.selectionStart,
+              end: event.currentTarget.selectionEnd,
+            })
+          }
+          onKeyUp={(event) =>
+            onSelectionChange({
+              start: event.currentTarget.selectionStart,
+              end: event.currentTarget.selectionEnd,
+            })
+          }
+          onKeyDown={(event) => {
+            if (event.key !== "Tab") {
+              return;
+            }
+
+            event.preventDefault();
+            indentSelection(event.shiftKey ? "out" : "in");
+          }}
+        />
+      </div>
 
       <div className="source-footer">
         <div className="source-footer__summary">
