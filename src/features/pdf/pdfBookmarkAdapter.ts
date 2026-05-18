@@ -9,6 +9,13 @@ import { BookmarkNode } from "../bookmarks/bookmarkTypes";
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
+const RAW_FALLBACK_MAX_BYTES = 64 * 1024 * 1024;
+const STARTXREF_SCAN_BYTES = 256 * 1024;
+const XREF_SECTION_INITIAL_SCAN_BYTES = 256 * 1024;
+const XREF_SECTION_MAX_SCAN_BYTES = 32 * 1024 * 1024;
+const INDIRECT_OBJECT_INITIAL_SCAN_BYTES = 32 * 1024;
+const INDIRECT_OBJECT_MAX_SCAN_BYTES = 1024 * 1024;
+
 type PdfOutlineItem = Awaited<ReturnType<PDFDocumentProxy["getOutline"]>> extends Array<infer T>
   ? T
   : never;
@@ -26,6 +33,19 @@ type RefLike = {
 type IndirectObject = {
   ref: PdfObjectRef;
   body: string;
+};
+
+type XrefEntry = {
+  offset: number;
+  generationNumber: number;
+  inUse: boolean;
+};
+
+type ClassicXrefSection = {
+  entries: Map<string, XrefEntry>;
+  rootRef: PdfObjectRef | null;
+  prev: number | null;
+  size: number | null;
 };
 
 export type PdfBookmarkReadDiagnostics = {
@@ -59,6 +79,14 @@ const toHexColor = (color: Uint8ClampedArray): string | null => {
 
 const countBookmarks = (nodes: BookmarkNode[]): number =>
   nodes.reduce((total, node) => total + 1 + countBookmarks(node.children), 0);
+
+const formatBytes = (byteLength: number): string => {
+  if (byteLength < 1024 * 1024) {
+    return `${Math.max(1, Math.round(byteLength / 1024))} KB`;
+  }
+
+  return `${(byteLength / (1024 * 1024)).toFixed(byteLength >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
+};
 
 const resolveDestination = async (
   documentProxy: PDFDocumentProxy,
@@ -105,16 +133,7 @@ const mapOutlineItems = async (
     })),
   );
 
-const readLatin1 = (bytes: Uint8Array): string => {
-  let result = "";
-  const chunkSize = 0x8000;
-
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    result += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-
-  return result;
-};
+const readLatin1 = (bytes: Uint8Array): string => new TextDecoder("latin1").decode(bytes);
 
 const parseObjectRef = (value: string | null): PdfObjectRef | null => {
   if (!value) {
@@ -147,26 +166,12 @@ const parseIndirectObjects = (source: string): Map<string, string> => {
   return objects;
 };
 
-const parseIndirectObjectEntries = (source: string): IndirectObject[] => {
-  const objects: IndirectObject[] = [];
-  const objectPattern = /(\d+)\s+(\d+)\s+obj\b([\s\S]*?)\bendobj\b/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = objectPattern.exec(source)) !== null) {
-    objects.push({
-      ref: {
-        objectNumber: Number(match[1]),
-        generationNumber: Number(match[2]),
-      },
-      body: match[3].trim(),
-    });
-  }
-
-  return objects;
-};
-
 const findDictionaryValue = (objectBody: string, key: string): string | null => {
-  const match = objectBody.match(new RegExp(`/${key}\\s+([^\\n\\r<>\\[\\]/]+\\s+[^\\n\\r<>\\[\\]/]+\\s+R|\\[[\\s\\S]*?\\]|\\([^\\)]*\\)|<[^<>]*>|/[^\\s<>\\[\\]()]+)`));
+  const match = objectBody.match(
+    new RegExp(
+      `/${key}\\s+([^\\n\\r<>\\[\\]/]+\\s+[^\\n\\r<>\\[\\]/]+\\s+R|\\[[\\s\\S]*?\\]|\\([^\\)]*\\)|<[^<>]*>|-?\\d+(?:\\.\\d+)?|true|false|null|/[^\\s<>\\[\\]()]+)`,
+    ),
+  );
   return match?.[1]?.trim() ?? null;
 };
 
@@ -179,9 +184,6 @@ const findCatalog = (objects: Map<string, string>): string | null => {
 
   return null;
 };
-
-const findCatalogObject = (objects: IndirectObject[]): IndirectObject | null =>
-  objects.find((object) => /\/Type\s*\/Catalog\b/.test(object.body)) ?? null;
 
 const decodeHexString = (hexString: string): string => {
   const normalized = hexString.replace(/\s/g, "");
@@ -410,19 +412,263 @@ const readFallbackOutline = (
   };
 };
 
-const findLastStartXref = (source: string): number => {
+const readBlobBytes = async (
+  blob: Blob,
+  start: number,
+  end: number,
+): Promise<Uint8Array> => new Uint8Array(await blob.slice(start, end).arrayBuffer());
+
+const readBlobLatin1 = async (
+  blob: Blob,
+  start: number,
+  end: number,
+): Promise<string> => readLatin1(await readBlobBytes(blob, start, end));
+
+const extractDictionaryBlock = (
+  source: string,
+  searchStartIndex: number,
+): string | null => {
+  const startIndex = source.indexOf("<<", searchStartIndex);
+  if (startIndex === -1) {
+    return null;
+  }
+
+  let depth = 0;
+
+  for (let index = startIndex; index < source.length - 1; index += 1) {
+    const pair = source.slice(index, index + 2);
+    if (pair === "<<") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (pair === ">>") {
+      depth -= 1;
+      index += 1;
+      if (depth === 0) {
+        return source.slice(startIndex, index + 1);
+      }
+    }
+  }
+
+  return null;
+};
+
+const parseClassicXrefEntries = (source: string): Map<string, XrefEntry> => {
+  const entries = new Map<string, XrefEntry>();
+  const lines = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let index = 0; index < lines.length;) {
+    const subsectionMatch = lines[index].match(/^(\d+)\s+(\d+)$/);
+    if (!subsectionMatch) {
+      throw new Error("Export failed because a classic xref subsection header could not be parsed.");
+    }
+
+    const startObjectNumber = Number(subsectionMatch[1]);
+    const count = Number(subsectionMatch[2]);
+    index += 1;
+
+    for (let entryIndex = 0; entryIndex < count; entryIndex += 1, index += 1) {
+      const entryLine = lines[index];
+      if (!entryLine) {
+        throw new Error("Export failed because a classic xref entry was truncated.");
+      }
+
+      const entryMatch = entryLine.match(/^(\d{10})\s+(\d{5})\s+([nf])$/);
+      if (!entryMatch) {
+        throw new Error("Export failed because a classic xref entry could not be parsed.");
+      }
+
+      const ref = {
+        objectNumber: startObjectNumber + entryIndex,
+        generationNumber: Number(entryMatch[2]),
+      };
+
+      entries.set(refKey(ref), {
+        offset: Number(entryMatch[1]),
+        generationNumber: Number(entryMatch[2]),
+        inUse: entryMatch[3] === "n",
+      });
+    }
+  }
+
+  return entries;
+};
+
+const parseClassicXrefSection = (source: string): ClassicXrefSection => {
+  const trimmed = source.trimStart();
+  if (!trimmed.startsWith("xref")) {
+    throw new Error(
+      "Export failed because this PDF does not expose a classic xref table at the final startxref offset. XRef streams are not supported by the current writer yet.",
+    );
+  }
+
+  const trailerIndex = trimmed.indexOf("trailer");
+  if (trailerIndex === -1) {
+    throw new Error("Export failed because the classic xref trailer could not be located.");
+  }
+
+  const xrefBody = trimmed.slice("xref".length, trailerIndex).trim();
+  const trailerBody = extractDictionaryBlock(trimmed, trailerIndex);
+  if (!trailerBody) {
+    throw new Error("Export failed because the classic xref trailer dictionary was truncated.");
+  }
+
+  const sizeValue = findDictionaryValue(trailerBody, "Size");
+  const prevValue = findDictionaryValue(trailerBody, "Prev");
+
+  return {
+    entries: parseClassicXrefEntries(xrefBody),
+    rootRef: parseObjectRef(findDictionaryValue(trailerBody, "Root")),
+    prev: prevValue ? Number(prevValue) : null,
+    size: sizeValue ? Number(sizeValue) : null,
+  };
+};
+
+const readClassicXrefSectionAtOffset = async (
+  file: File,
+  offset: number,
+): Promise<ClassicXrefSection> => {
+  for (
+    let length = XREF_SECTION_INITIAL_SCAN_BYTES;
+    length <= XREF_SECTION_MAX_SCAN_BYTES;
+    length *= 2
+  ) {
+    const end = Math.min(file.size, offset + length);
+    const source = await readBlobLatin1(file, offset, end);
+
+    try {
+      return parseClassicXrefSection(source);
+    } catch (error) {
+      const isIncomplete =
+        error instanceof Error &&
+        /truncated|could not be located/i.test(error.message) &&
+        end < file.size;
+
+      if (isIncomplete) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error(
+    `Export failed because the classic xref section at offset ${offset} could not be read without scanning too much of the file.`,
+  );
+};
+
+const findLastStartXrefInFile = async (file: File): Promise<number> => {
+  const start = Math.max(0, file.size - STARTXREF_SCAN_BYTES);
+  const source = await readBlobLatin1(file, start, file.size);
   const matches = [...source.matchAll(/startxref\s+(\d+)\s+%%EOF/g)];
   const lastMatch = matches.at(-1);
 
   if (!lastMatch) {
-    throw new Error("Export failed because the PDF does not expose a classic startxref marker.");
+    throw new Error("Export failed because the PDF does not expose a readable startxref marker near the file tail.");
   }
 
   return Number(lastMatch[1]);
 };
 
-const getMaxObjectNumber = (objects: IndirectObject[]): number =>
-  objects.reduce((max, object) => Math.max(max, object.ref.objectNumber), 0);
+const readIndirectObjectAtOffset = async (
+  file: File,
+  ref: PdfObjectRef,
+  offset: number,
+): Promise<IndirectObject> => {
+  for (
+    let length = INDIRECT_OBJECT_INITIAL_SCAN_BYTES;
+    length <= INDIRECT_OBJECT_MAX_SCAN_BYTES;
+    length *= 2
+  ) {
+    const end = Math.min(file.size, offset + length);
+    const source = await readBlobLatin1(file, offset, end);
+    const match = source.match(/^\s*(\d+)\s+(\d+)\s+obj\b([\s\S]*?)\bendobj\b/);
+
+    if (!match) {
+      if (end < file.size) {
+        continue;
+      }
+      break;
+    }
+
+    const objectRef = {
+      objectNumber: Number(match[1]),
+      generationNumber: Number(match[2]),
+    };
+
+    if (objectRef.objectNumber !== ref.objectNumber || objectRef.generationNumber !== ref.generationNumber) {
+      throw new Error(
+        `Export failed because xref resolved ${formatRef(ref)} to a different indirect object (${formatRef(objectRef)}).`,
+      );
+    }
+
+    return {
+      ref: objectRef,
+      body: match[3].trim(),
+    };
+  }
+
+  throw new Error(`Export failed because indirect object ${formatRef(ref)} could not be read safely.`);
+};
+
+const resolveObjectOffsetFromXrefChain = async (
+  file: File,
+  targetRef: PdfObjectRef,
+  startXref: number,
+): Promise<number> => {
+  const visitedOffsets = new Set<number>();
+  let currentOffset: number | null = startXref;
+
+  while (currentOffset !== null && !visitedOffsets.has(currentOffset)) {
+    visitedOffsets.add(currentOffset);
+    const section = await readClassicXrefSectionAtOffset(file, currentOffset);
+    const entry = section.entries.get(refKey(targetRef));
+
+    if (entry?.inUse) {
+      return entry.offset;
+    }
+
+    currentOffset = section.prev;
+  }
+
+  throw new Error(`Export failed because ${formatRef(targetRef)} could not be resolved from the xref chain.`);
+};
+
+const readPdfStructureForIncrementalUpdate = async (
+  file: File,
+): Promise<{
+  startXref: number;
+  rootRef: PdfObjectRef;
+  nextObjectNumber: number;
+  catalogObject: IndirectObject;
+}> => {
+  const startXref = await findLastStartXrefInFile(file);
+  const latestSection = await readClassicXrefSectionAtOffset(file, startXref);
+  const rootRef = latestSection.rootRef;
+
+  if (!rootRef) {
+    throw new Error("Export failed because the final trailer does not expose a /Root catalog reference.");
+  }
+
+  if (!latestSection.size || !Number.isFinite(latestSection.size)) {
+    throw new Error("Export failed because the final trailer does not expose a usable /Size value.");
+  }
+
+  const catalogOffset = await resolveObjectOffsetFromXrefChain(file, rootRef, startXref);
+  const catalogObject = await readIndirectObjectAtOffset(file, rootRef, catalogOffset);
+
+  return {
+    startXref,
+    rootRef,
+    nextObjectNumber: latestSection.size,
+    catalogObject,
+  };
+};
 
 const replaceOrAppendDictionaryRef = (
   dictionaryBody: string,
@@ -562,28 +808,27 @@ const buildOutlineObjects = (
 };
 
 const appendIncrementalUpdate = (
-  originalBytes: Uint8Array,
+  originalFile: File,
+  originalByteLength: number,
   objects: IndirectObject[],
   previousStartXref: number,
   rootRef: PdfObjectRef,
 ): Blob => {
   const encoder = new TextEncoder();
-  const toArrayBuffer = (value: Uint8Array): ArrayBuffer => {
-    const copy = new Uint8Array(value.byteLength);
-    copy.set(value);
-    return copy.buffer;
-  };
   const sortedObjects = [...objects].sort((left, right) => left.ref.objectNumber - right.ref.objectNumber);
-  let appended = "\n";
+  const parts = ["\n"];
+  let appendedLength = encoder.encode(parts[0]).length;
   const entries = sortedObjects.map((object) => {
-    const offset = originalBytes.length + encoder.encode(appended).length;
-    appended += `${object.ref.objectNumber} ${object.ref.generationNumber} obj\n${object.body}\nendobj\n`;
+    const serializedObject = `${object.ref.objectNumber} ${object.ref.generationNumber} obj\n${object.body}\nendobj\n`;
+    const offset = originalByteLength + appendedLength;
+    parts.push(serializedObject);
+    appendedLength += encoder.encode(serializedObject).length;
     return { ref: object.ref, offset };
   });
-  const xrefOffset = originalBytes.length + encoder.encode(appended).length;
+  const xrefOffset = originalByteLength + appendedLength;
   const maxObjectNumber = Math.max(...sortedObjects.map((object) => object.ref.objectNumber));
 
-  appended += "xref\n";
+  parts.push("xref\n");
 
   for (let index = 0; index < entries.length;) {
     const startObjectNumber = entries[index].ref.objectNumber;
@@ -598,17 +843,19 @@ const appendIncrementalUpdate = (
       index += 1;
     }
 
-    appended += `${startObjectNumber} ${sectionEntries.length}\n`;
-    appended += sectionEntries
-      .map((entry) => `${String(entry.offset).padStart(10, "0")} ${String(entry.ref.generationNumber).padStart(5, "0")} n \n`)
-      .join("");
+    parts.push(`${startObjectNumber} ${sectionEntries.length}\n`);
+    parts.push(
+      sectionEntries
+        .map((entry) => `${String(entry.offset).padStart(10, "0")} ${String(entry.ref.generationNumber).padStart(5, "0")} n \n`)
+        .join(""),
+    );
   }
 
-  appended += `trailer\n<<\n  /Size ${maxObjectNumber + 1}\n  /Root ${formatRef(rootRef)}\n  /Prev ${previousStartXref}\n>>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  parts.push(
+    `trailer\n<<\n  /Size ${maxObjectNumber + 1}\n  /Root ${formatRef(rootRef)}\n  /Prev ${previousStartXref}\n>>\nstartxref\n${xrefOffset}\n%%EOF\n`,
+  );
 
-  const appendedBytes = encoder.encode(appended);
-
-  return new Blob([toArrayBuffer(originalBytes), toArrayBuffer(appendedBytes)], { type: "application/pdf" });
+  return new Blob([originalFile, encoder.encode(parts.join(""))], { type: "application/pdf" });
 };
 
 export type PdfBookmarkAdapter = {
@@ -622,7 +869,6 @@ export const createPdfBookmarkAdapter = (): PdfBookmarkAdapter => {
 
   return {
     async readBookmarks(file) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
       const diagnostics: PdfBookmarkReadDiagnostics = {
         pdfjsOutlineCount: null,
         fallbackOutlineCount: null,
@@ -630,74 +876,85 @@ export const createPdfBookmarkAdapter = (): PdfBookmarkAdapter => {
         usedFallback: false,
         warnings: [],
       };
-      const loadingTask = getDocument(bytes.slice());
-
-      const documentProxy = await loadingTask.promise;
-
+      const objectUrl = URL.createObjectURL(file);
       try {
-        const outline = await documentProxy.getOutline();
-        diagnostics.pdfjsOutlineCount = outline?.length ?? 0;
+        const loadingTask = getDocument(objectUrl);
+        const documentProxy = await loadingTask.promise;
+        try {
+          const outline = await documentProxy.getOutline();
+          diagnostics.pdfjsOutlineCount = outline?.length ?? 0;
 
-        if (!outline || outline.length === 0) {
-          const fallback = readFallbackOutline(bytes, createId);
-          diagnostics.fallbackOutlineCount = countBookmarks(fallback.bookmarks);
-          diagnostics.hasRawOutlinesMarker = fallback.hasRawOutlinesMarker;
-          diagnostics.usedFallback = fallback.bookmarks.length > 0;
+          if (!outline || outline.length === 0) {
+            if (file.size > RAW_FALLBACK_MAX_BYTES) {
+              diagnostics.hasRawOutlinesMarker = false;
+              diagnostics.warnings.push(
+                `Skipped the raw /Outlines fallback for this ${formatBytes(file.size)} PDF to avoid unsafe full-file string conversion in the browser.`,
+              );
 
-          if (fallback.hasRawOutlinesMarker && fallback.bookmarks.length === 0) {
-            diagnostics.warnings.push(
-              "The raw PDF contains an /Outlines marker, but no readable outline items were returned.",
-            );
+              return {
+                bookmarks: [],
+                diagnostics,
+              };
+            }
+
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            const fallback = readFallbackOutline(bytes, createId);
+            diagnostics.fallbackOutlineCount = countBookmarks(fallback.bookmarks);
+            diagnostics.hasRawOutlinesMarker = fallback.hasRawOutlinesMarker;
+            diagnostics.usedFallback = fallback.bookmarks.length > 0;
+
+            if (fallback.hasRawOutlinesMarker && fallback.bookmarks.length === 0) {
+              diagnostics.warnings.push(
+                "The raw PDF contains an /Outlines marker, but no readable outline items were returned.",
+              );
+            }
+
+            return {
+              bookmarks: fallback.bookmarks,
+              diagnostics,
+            };
           }
 
+          const bookmarks = await mapOutlineItems(documentProxy, outline, createId);
+          diagnostics.fallbackOutlineCount = null;
+
           return {
-            bookmarks: fallback.bookmarks,
+            bookmarks,
             diagnostics,
           };
-        }
-
-        const bookmarks = await mapOutlineItems(documentProxy, outline, createId);
-        diagnostics.fallbackOutlineCount = null;
-
-        return {
-          bookmarks,
-          diagnostics,
+        } finally {
+          await documentProxy.destroy();
         };
       } finally {
-        await documentProxy.destroy();
+        URL.revokeObjectURL(objectUrl);
       }
     },
     async writeBookmarks(file, bookmarks) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const source = readLatin1(bytes);
-      const objectEntries = parseIndirectObjectEntries(source);
-      const catalogObject = findCatalogObject(objectEntries);
-
-      if (!catalogObject) {
-        throw new Error("Export failed because the PDF catalog object could not be found.");
-      }
-
-      const previousStartXref = findLastStartXref(source);
-      const loadingTask = getDocument(bytes.slice());
-      const documentProxy = await loadingTask.promise;
-
+      const structure = await readPdfStructureForIncrementalUpdate(file);
+      const objectUrl = URL.createObjectURL(file);
       try {
-        const pageRefs = await readPageRefs(documentProxy);
-        const firstNewObjectNumber = getMaxObjectNumber(objectEntries) + 1;
-        const outlineObjects = buildOutlineObjects(bookmarks, pageRefs, firstNewObjectNumber);
-        const patchedCatalog: IndirectObject = {
-          ref: catalogObject.ref,
-          body: replaceOrAppendDictionaryRef(catalogObject.body, "Outlines", outlineObjects[0].ref),
-        };
+        const loadingTask = getDocument(objectUrl);
+        const documentProxy = await loadingTask.promise;
+        try {
+          const pageRefs = await readPageRefs(documentProxy);
+          const outlineObjects = buildOutlineObjects(bookmarks, pageRefs, structure.nextObjectNumber);
+          const patchedCatalog: IndirectObject = {
+            ref: structure.catalogObject.ref,
+            body: replaceOrAppendDictionaryRef(structure.catalogObject.body, "Outlines", outlineObjects[0].ref),
+          };
 
-        return appendIncrementalUpdate(
-          bytes,
-          [patchedCatalog, ...outlineObjects],
-          previousStartXref,
-          catalogObject.ref,
-        );
+          return appendIncrementalUpdate(
+            file,
+            file.size,
+            [patchedCatalog, ...outlineObjects],
+            structure.startXref,
+            structure.rootRef,
+          );
+        } finally {
+          await documentProxy.destroy();
+        }
       } finally {
-        await documentProxy.destroy();
+        URL.revokeObjectURL(objectUrl);
       }
     },
   };

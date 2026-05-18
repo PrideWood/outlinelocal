@@ -27,6 +27,7 @@ type StatusTone = "info" | "warning" | "error";
 export type OutlineStatus = {
   message: string;
   tone: StatusTone;
+  details?: string | null;
 };
 
 type DocumentSnapshot = {
@@ -39,6 +40,53 @@ type DocumentSnapshot = {
 type DocumentHistory = {
   past: DocumentSnapshot[];
   future: DocumentSnapshot[];
+};
+
+const LARGE_PDF_WARNING_BYTES = 100 * 1024 * 1024;
+const VERY_LARGE_PDF_WARNING_BYTES = 250 * 1024 * 1024;
+
+const formatFileSize = (byteLength: number): string => {
+  if (byteLength < 1024 * 1024) {
+    return `${Math.max(1, Math.round(byteLength / 1024))} KB`;
+  }
+
+  return `${(byteLength / (1024 * 1024)).toFixed(byteLength >= LARGE_PDF_WARNING_BYTES ? 0 : 1)} MB`;
+};
+
+const getLargeFileWarning = (fileSize: number): string | null => {
+  if (fileSize >= VERY_LARGE_PDF_WARNING_BYTES) {
+    return "This PDF is very large. Browser-only outline processing may fail due to current memory limits.";
+  }
+
+  if (fileSize >= LARGE_PDF_WARNING_BYTES) {
+    return "This PDF is large. Browser-only outline processing may take longer or use substantial memory.";
+  }
+
+  return null;
+};
+
+const getPdfFailureMessage = (error: unknown, action: "open" | "export"): OutlineStatus => {
+  const technicalMessage = error instanceof Error ? error.message : String(error);
+
+  if (/Invalid string length/i.test(technicalMessage)) {
+    return {
+      message:
+        action === "open"
+          ? "PDF processing failed, likely because the file is too large for the current browser-side outline reader. Try a smaller or optimized PDF, or use a desktop tool for very large files."
+          : "PDF export failed, likely because the file is too large for the current browser-side writing method. Try a smaller or optimized PDF, or use a desktop tool for very large files.",
+      tone: "error",
+      details: technicalMessage,
+    };
+  }
+
+  return {
+    message:
+      action === "open"
+        ? `Outline extraction failed: ${technicalMessage}`
+        : technicalMessage || "PDF export failed before a downloadable file could be created.",
+    tone: "error",
+    details: technicalMessage,
+  };
 };
 
 const createBookmarkIdFactory = () => {
@@ -69,6 +117,7 @@ export const useOutlineDocument = () => {
   const [status, setStatus] = useState<OutlineStatus>({
     message: "Editing sample outline data. PDF outline read/write remains behind a placeholder adapter.",
     tone: "warning",
+    details: null,
   });
   const createId = useMemo(() => createBookmarkIdFactory(), []);
   const pdfBookmarkAdapter = useMemo(() => createPdfBookmarkAdapter(), []);
@@ -180,8 +229,8 @@ export const useOutlineDocument = () => {
     status,
     canUndo: history.past.length > 0,
     canRedo: history.future.length > 0,
-    setStatusMessage(message: string, tone: StatusTone = "info") {
-      setStatus({ message, tone });
+    setStatusMessage(message: string, tone: StatusTone = "info", details?: string | null) {
+      setStatus({ message, tone, details: details ?? null });
     },
     setEditorMode,
     setSelectedNodeId(nodeId: string | null) {
@@ -197,9 +246,11 @@ export const useOutlineDocument = () => {
       setCurrentFileName(file.name);
       setCurrentPdfFile(file);
       setOutlineLoadState("loading");
+      const largeFileWarning = getLargeFileWarning(file.size);
       setStatus({
         message: `Reading outline data from ${file.name}...`,
-        tone: "info",
+        tone: largeFileWarning ? "warning" : "info",
+        details: largeFileWarning,
       });
 
       try {
@@ -220,6 +271,7 @@ export const useOutlineDocument = () => {
               ? `${file.name} contains an /Outlines marker, but no readable outline items were extracted. ${readResult.diagnostics.warnings.join(" ")}`
               : `${file.name} does not contain any PDF outline entries readable through the current adapter.`,
             tone: readResult.diagnostics.hasRawOutlinesMarker ? "error" : "warning",
+            details: readResult.diagnostics.warnings.join(" ") || largeFileWarning,
           });
           return;
         }
@@ -230,6 +282,7 @@ export const useOutlineDocument = () => {
         setStatus({
           message: `Loaded ${countBookmarks(extractedBookmarks)} outline entries from ${file.name}${readResult.diagnostics.usedFallback ? " using the raw /Outlines fallback." : "."}`,
           tone: "info",
+          details: [largeFileWarning, ...readResult.diagnostics.warnings].filter(Boolean).join(" ") || null,
         });
       } catch (error) {
         if (requestId !== loadRequestRef.current) {
@@ -239,13 +292,7 @@ export const useOutlineDocument = () => {
         syncTree([], null, { recordHistory: false });
         clearHistory();
         setOutlineLoadState("error");
-        setStatus({
-          message:
-            error instanceof Error
-              ? `Outline extraction failed: ${error.message}`
-              : "Outline extraction failed for the selected PDF.",
-          tone: "error",
-        });
+        setStatus(getPdfFailureMessage(error, "open"));
       }
     },
     importOutlineText(file: File | null) {
@@ -260,6 +307,7 @@ export const useOutlineDocument = () => {
         setStatus({
           message: `Could not read ${file.name} as outline text.`,
           tone: "error",
+          details: null,
         });
       });
     },
@@ -280,6 +328,7 @@ export const useOutlineDocument = () => {
       setStatus({
         message: `Exporting ${createEditedPdfFileName(currentFileName)}...`,
         tone: "info",
+        details: getLargeFileWarning(currentPdfFile.size),
       });
 
       try {
@@ -288,15 +337,10 @@ export const useOutlineDocument = () => {
         setStatus({
           message: `Exported ${countBookmarks(bookmarks)} outline entries to ${createEditedPdfFileName(currentFileName)}.`,
           tone: "info",
+          details: null,
         });
       } catch (error) {
-        setStatus({
-          message:
-            error instanceof Error
-              ? error.message
-              : "PDF export failed before a downloadable file could be created.",
-          tone: "error",
-        });
+        setStatus(getPdfFailureMessage(error, "export"));
       } finally {
         setIsExporting(false);
       }
@@ -316,6 +360,7 @@ export const useOutlineDocument = () => {
       setStatus({
         message: "Undid the previous outline edit.",
         tone: "info",
+        details: null,
       });
     },
     redo() {
@@ -333,6 +378,7 @@ export const useOutlineDocument = () => {
       setStatus({
         message: "Redid the outline edit.",
         tone: "info",
+        details: null,
       });
     },
     exportOutlineText() {
@@ -346,6 +392,7 @@ export const useOutlineDocument = () => {
       setStatus({
         message: "Exported the current outline text locally.",
         tone: "info",
+        details: null,
       });
     },
     applySourceText,

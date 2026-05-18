@@ -483,3 +483,7 @@ button:disabled {
 .status-bar__message--error {
   color: var(--danger);
 }
+
+.status-bar__details {
+  color: var(--ink-soft);
+}

@@ -25,5 +25,6 @@ export const StatusBar = ({
     <span>Root bookmarks: {bookmarkCount}</span>
     <span>Outline state: {outlineLoadState}</span>
     <span className={`status-bar__message status-bar__message--${status.tone}`}>{status.message}</span>
+    {status.details ? <span className="status-bar__details">Details: {status.details}</span> : null}
   </footer>
 );
